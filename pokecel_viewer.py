@@ -15,6 +15,8 @@ import pygame
 import trimesh
 from PIL import Image
 
+from pokecel_controls import ControlPanel
+
 VS = r'''#version 330
 uniform mat4 mvp, model;
 uniform mat3 normal_matrix;
@@ -40,10 +42,18 @@ uniform sampler2D tex;
 uniform bool has_texture;
 uniform int mode;
 uniform vec3 light_dir, camera_pos;
+uniform float cel_softness, shadow_strength, saturation;
 in vec3 world_pos, normal;
 in vec2 uv;
 in vec4 color;
-out vec4 frag;
+layout(location=0) out vec4 frag;
+layout(location=1) out vec4 normal_out;
+
+vec3 saturate_color(vec3 c, float amount){
+    float luma = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return mix(vec3(luma), c, amount);
+}
+
 void main(){
     vec4 base = (has_texture ? texture(tex, uv) : vec4(1.0)) * color;
     if(base.a < 0.08) discard;
@@ -51,27 +61,37 @@ void main(){
     vec3 n = normalize(normal);
     vec3 l = normalize(light_dir);
     float ndl = clamp(dot(n, l), 0.0, 1.0);
+    float s = max(cel_softness, 0.0001);
     vec3 c;
 
     if(mode == 0){
-        float d = 0.30 + 0.70 * ndl;
+        float d = 0.34 + 0.66 * ndl;
         vec3 v = normalize(camera_pos - world_pos);
         vec3 h = normalize(l + v);
-        c = base.rgb * d + pow(max(dot(n, h), 0.0), 48.0) * 0.06;
+        c = base.rgb * d + pow(max(dot(n, h), 0.0), 48.0) * 0.05;
     }else if(mode == 1){
-        float b = ndl > 0.64 ? 1.03 : (ndl > 0.30 ? 0.84 : 0.66);
+        float mid = smoothstep(0.30 - s, 0.30 + s, ndl);
+        float high = smoothstep(0.64 - s, 0.64 + s, ndl);
+        float dark_level = mix(1.0, 0.66, shadow_strength);
+        float mid_level = mix(1.0, 0.84, shadow_strength);
+        float b = mix(dark_level, mid_level, mid);
+        b = mix(b, 1.03, high);
         c = base.rgb * b;
     }else{
-        // A deliberately illustration-biased ramp: frontal/wrapped light keeps
-        // broad character surfaces readable instead of cutting them in half.
+        // Illustration-biased wrapped light: broad surfaces stay readable while
+        // retaining a controllable cel boundary.
         float wrapped = clamp((dot(n, l) + 0.28) / 1.28, 0.0, 1.0);
-        float lit = smoothstep(0.34, 0.38, wrapped);
-        float hi = smoothstep(0.84, 0.90, wrapped);
-        vec3 shadow = base.rgb * vec3(0.73, 0.69, 0.76);
+        float lit = smoothstep(0.36 - s, 0.36 + s, wrapped);
+        float hi = smoothstep(0.87 - s, 0.87 + s, wrapped);
+        vec3 shadow_tint = vec3(0.73, 0.69, 0.76);
+        vec3 shadow = base.rgb * mix(vec3(1.0), shadow_tint, shadow_strength);
         c = mix(shadow, base.rgb, lit);
-        c = mix(c, min(base.rgb * 1.06, vec3(1.0)), hi * 0.30);
+        c = mix(c, min(base.rgb * 1.06, vec3(1.0)), hi * 0.28);
     }
-    frag = vec4(c, base.a);
+
+    c = saturate_color(c, saturation);
+    frag = vec4(clamp(c, 0.0, 1.0), base.a);
+    normal_out = vec4(n * 0.5 + 0.5, 1.0);
 }'''
 
 POST_VS = r'''#version 330
@@ -86,32 +106,54 @@ void main(){
 }'''
 
 POST_FS = r'''#version 330
-uniform sampler2D scene_tex, depth_tex;
+uniform sampler2D scene_tex, normal_tex, depth_tex;
 uniform vec2 texel;
 uniform bool outline;
-uniform float outline_px;
+uniform float outline_px, internal_edges, outline_opacity;
 in vec2 uv;
 out vec4 frag;
 
 bool bg(float d){ return d > 0.99995; }
+vec3 nrm(vec2 at){ return normalize(texture(normal_tex, at).xyz * 2.0 - 1.0); }
+
+bool edge_to(vec2 offset){
+    float d0 = texture(depth_tex, uv).r;
+    float d1 = texture(depth_tex, uv + offset).r;
+    bool b0 = bg(d0);
+    bool b1 = bg(d1);
+
+    // Outer silhouette.
+    if(b0 != b1) return true;
+    if(b0) return false;
+
+    // Internal occlusion / intersecting-part boundary. Higher sensitivity lowers
+    // both thresholds and therefore reveals more limb/body separation.
+    float depth_threshold = mix(0.0035, 0.00012, internal_edges);
+    float normal_threshold = mix(0.72, 0.10, internal_edges);
+    float dd = abs(d0 - d1);
+    float nd = 1.0 - clamp(dot(nrm(uv), nrm(uv + offset)), -1.0, 1.0);
+    return dd > depth_threshold || nd > normal_threshold;
+}
 
 void main(){
     vec4 c = texture(scene_tex, uv);
-    if(outline){
-        float d = texture(depth_tex, uv).r;
-        bool here = bg(d);
+    if(outline && outline_px > 0.01){
         vec2 r = texel * outline_px;
+        vec2 h = texel * max(1.0, outline_px * 0.5);
         bool edge = false;
-        edge = edge || (bg(texture(depth_tex, uv + vec2( r.x, 0.0)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2(-r.x, 0.0)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2(0.0,  r.y)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2(0.0, -r.y)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2( r.x,  r.y)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2(-r.x,  r.y)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2( r.x, -r.y)).r) != here);
-        edge = edge || (bg(texture(depth_tex, uv + vec2(-r.x, -r.y)).r) != here);
+        edge = edge || edge_to(vec2( r.x, 0.0));
+        edge = edge || edge_to(vec2(-r.x, 0.0));
+        edge = edge || edge_to(vec2(0.0,  r.y));
+        edge = edge || edge_to(vec2(0.0, -r.y));
+        edge = edge || edge_to(vec2( r.x,  r.y));
+        edge = edge || edge_to(vec2(-r.x,  r.y));
+        edge = edge || edge_to(vec2( r.x, -r.y));
+        edge = edge || edge_to(vec2(-r.x, -r.y));
+        edge = edge || edge_to(vec2( h.x, 0.0));
+        edge = edge || edge_to(vec2(0.0, h.y));
         if(edge){
-            frag = vec4(0.075, 0.060, 0.075, 1.0);
+            vec3 ink = vec3(0.070, 0.055, 0.070);
+            frag = vec4(mix(c.rgb, ink, outline_opacity), max(c.a, outline_opacity));
             return;
         }
     }
@@ -198,7 +240,6 @@ def image_for(mesh):
 
 
 def numpy_vertex_normals(vertices, faces):
-    """Area-weighted smooth normals without trimesh's optional SciPy path."""
     vertices = np.asarray(vertices, np.float32)
     faces = np.asarray(faces, np.int64)
     tri = vertices[faces]
@@ -215,12 +256,10 @@ def pack(mesh):
     faces = np.asarray(mesh.faces, np.int64)
     if faces.ndim != 2 or faces.shape[1] != 3:
         raise ValueError('mesh is not triangular')
-
     vertices = np.asarray(mesh.vertices, np.float32)
     idx = faces.reshape(-1)
     p = vertices[idx]
     n = numpy_vertex_normals(vertices, faces)[idx]
-
     tri = p.reshape(-1, 3, 3)
     fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
     fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-12)
@@ -327,13 +366,15 @@ def save_screen(ctx, w, h):
 
 def make_targets(ctx, width, height):
     color = ctx.texture((width, height), 4)
-    color.filter = (moderngl.NEAREST, moderngl.NEAREST)
-    color.repeat_x = color.repeat_y = False
+    normal = ctx.texture((width, height), 4)
+    for texture in (color, normal):
+        texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        texture.repeat_x = texture.repeat_y = False
     depth = ctx.depth_texture((width, height))
     depth.filter = (moderngl.NEAREST, moderngl.NEAREST)
     depth.repeat_x = depth.repeat_y = False
-    fbo = ctx.framebuffer(color_attachments=[color], depth_attachment=depth)
-    return fbo, color, depth
+    fbo = ctx.framebuffer(color_attachments=[color, normal], depth_attachment=depth)
+    return fbo, color, normal, depth
 
 
 def run(path, w, h):
@@ -355,23 +396,24 @@ def run(path, w, h):
     prog['tex'].value = 0
     post = ctx.program(vertex_shader=POST_VS, fragment_shader=POST_FS)
     post['scene_tex'].value = 0
-    post['depth_tex'].value = 1
+    post['normal_tex'].value = 1
+    post['depth_tex'].value = 2
     quad = ctx.vertex_array(post, [])
 
     draw = batches(ctx, prog, load_meshes(path))
     name = path.name if path else 'demo mesh'
+    controls = ControlPanel()
 
-    fbo, scene_color, scene_depth = make_targets(ctx, w, h)
+    fbo, scene_color, scene_normal, scene_depth = make_targets(ctx, w, h)
     yaw = pitch = 0.0
     dist = 4.2
     mode = 2
     outline = True
     flat = False
     drag = False
-    last = (0, 0)
     clock = pygame.time.Clock()
 
-    print('1 smooth | 2 toon | 3 anime | O silhouette | F flat normals | drag orbit | wheel zoom | P screenshot | Esc quit')
+    print('1 smooth | 2 toon | 3 anime | O outlines | F flat normals | left-drag orbit | wheel zoom | P screenshot | Esc quit')
     running = True
     while running:
         resized = False
@@ -392,15 +434,18 @@ def run(path, w, h):
                     dist = 4.2
                 elif e.key == pygame.K_p:
                     save_screen(ctx, w, h)
+                elif e.key in (pygame.K_a, pygame.K_LEFT):
+                    yaw -= 0.12
+                elif e.key in (pygame.K_d, pygame.K_RIGHT):
+                    yaw += 0.12
             elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                 drag = True
-                last = e.pos
             elif e.type == pygame.MOUSEBUTTONUP and e.button == 1:
                 drag = False
             elif e.type == pygame.MOUSEMOTION and drag:
-                yaw += (e.pos[0] - last[0]) * .008
-                pitch = float(np.clip(pitch + (e.pos[1] - last[1]) * .008, -1.45, 1.45))
-                last = e.pos
+                dx, dy = e.rel
+                yaw += dx * .008
+                pitch = float(np.clip(pitch + dy * .008, -1.45, 1.45))
             elif e.type == pygame.MOUSEWHEEL:
                 dist = float(np.clip(dist * (.9 ** e.y), 2.1, 12))
             elif e.type == pygame.VIDEORESIZE:
@@ -410,12 +455,14 @@ def run(path, w, h):
         if resized:
             fbo.release()
             scene_color.release()
+            scene_normal.release()
             scene_depth.release()
-            fbo, scene_color, scene_depth = make_targets(ctx, w, h)
+            fbo, scene_color, scene_normal, scene_depth = make_targets(ctx, w, h)
 
+        values = controls.poll()
         clock.tick(120)
         pygame.display.set_caption(
-            f'PokeCel — {name} — {("smooth", "toon", "anime")[mode]} | silhouette {outline} | flat normals {flat}'
+            f'PokeCel — {name} — {("smooth", "toon", "anime")[mode]} | outlines {outline} | flat normals {flat}'
         )
 
         eye = np.array([0, 0, dist], np.float32)
@@ -435,6 +482,9 @@ def run(path, w, h):
         prog['light_dir'].value = tuple(unit(np.array([-.22, .46, .86], np.float32)))
         prog['mode'].value = mode
         prog['flat_normals'].value = flat
+        prog['cel_softness'].value = values['softness']
+        prog['shadow_strength'].value = values['shadow_strength']
+        prog['saturation'].value = values['saturation']
 
         for b in draw:
             b.tex.use(0)
@@ -445,13 +495,17 @@ def run(path, w, h):
         ctx.viewport = (0, 0, w, h)
         ctx.disable(moderngl.DEPTH_TEST | moderngl.CULL_FACE)
         scene_color.use(0)
-        scene_depth.use(1)
+        scene_normal.use(1)
+        scene_depth.use(2)
         post['texel'].value = (1.0 / w, 1.0 / h)
         post['outline'].value = outline
-        post['outline_px'].value = 1.7
+        post['outline_px'].value = values['outline_px']
+        post['internal_edges'].value = values['internal_edges']
+        post['outline_opacity'].value = values['outline_opacity']
         quad.render(moderngl.TRIANGLES, vertices=3)
         pygame.display.flip()
 
+    controls.close()
     pygame.quit()
 
 
@@ -471,3 +525,7 @@ def main():
         print('For FBX assets, use the DAE or OBJ variant instead.', file=sys.stderr)
         return 1
     return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
