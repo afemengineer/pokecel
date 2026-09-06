@@ -17,6 +17,7 @@ This is an **experiment**, not a game engine. It avoids Blender, Godot, Unity, A
 - Toggles smooth vs. flat face normals so the influence of normal treatment is easy to inspect.
 - Saves screenshots for A/B comparisons.
 - Runs a built-in demo mesh when no model is supplied, so installation can be tested immediately.
+- Can resolve and download a **Pokémon X/Y** model ZIP from The Models Resource by Pokémon name or National Dex number.
 
 ## Requirements
 
@@ -52,6 +53,44 @@ python -m pip install -U pip
 pip install -r requirements.txt
 ```
 
+## Fetch a Pokémon directly
+
+The fetcher currently targets the **Pokémon X/Y** roster on The Models Resource. It discovers the current asset page rather than hard-coding one URL per Pokémon.
+
+Download by name:
+
+```bash
+python pokecel_fetch.py pikachu
+```
+
+or by National Dex number:
+
+```bash
+python pokecel_fetch.py 25
+```
+
+Downloaded ZIPs are cached under `models/`, which is ignored by Git.
+
+To download and immediately open the model in PokeCel:
+
+```bash
+python pokecel_fetch.py pikachu --run
+```
+
+For archives with multiple model variants, select one explicitly:
+
+```bash
+python pokecel_fetch.py pikachu --run --model PikachuM
+```
+
+Force a fresh download instead of using the cached ZIP:
+
+```bash
+python pokecel_fetch.py pikachu --refresh
+```
+
+The fetcher uses only Python's standard library for HTTP/HTML parsing, so it adds no extra pip dependencies. It may need adjustment if The Models Resource changes its page structure or blocks scripted requests.
+
 ## Run it without a model
 
 ```bash
@@ -74,6 +113,12 @@ python pokecel.py path/to/model.glb
 ```
 
 For VG Resource / Models Resource exports, prefer the **DAE** or **OBJ** version for this prototype.
+
+You can also run a previously downloaded Models Resource ZIP directly:
+
+```bash
+python pokecel_zip.py path/to/archive.zip
+```
 
 ### Why not FBX?
 
