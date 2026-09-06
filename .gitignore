@@ -3,4 +3,5 @@ __pycache__/
 .venv/
 venv/
 screenshots/
+models/
 .DS_Store
