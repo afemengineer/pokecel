@@ -90,8 +90,6 @@ FBX support is intentionally excluded from the baseline. Reliable Python FBX imp
 | `3` | Anime-style toon shader |
 | `O` | Toggle silhouette outline |
 | `F` | Toggle flat / smooth normals |
-| `A` / `D` | Rotate model |
-| `W` / `S` | Tilt model |
 | `R` | Reset view |
 | `P` | Save screenshot to `screenshots/` |
 | `Esc` | Quit |
