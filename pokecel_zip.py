@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 
 from pokecel import run
+from pokecel_dae import prepare_model
 
 SUPPORTED = {".dae", ".obj", ".glb", ".gltf", ".ply", ".stl"}
 
@@ -67,9 +68,11 @@ def select_model(found: list[Path], selector: str | None) -> Path:
         if not matches:
             choices = "\n".join(f"  - {p}" for p in found)
             raise ValueError(f"No model matching {selector!r}. Available models:\n{choices}")
-        return matches[0]
+        selected = matches[0]
+    else:
+        selected = found[0]
 
-    return found[0]
+    return prepare_model(selected)
 
 
 def main() -> int:
